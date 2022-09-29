@@ -57,9 +57,11 @@ const mergeQueue = queue({
 module.exports = (app: Probot) => {
   app.on('push', async (context) => {
     const { ref } = context.payload;
+    app.log.info(`push for ref: ${ref}`);
     if (ref.startsWith('refs/heads/')) {
       const branch = ref.substr('refs/heads/'.length);
-      if (branch === 'master' || /^[0-9]+-x-y$/.test(branch)) {
+      app.log.info(`push for branch: ${branch}`);
+      if (branch === 'main' || /^[0-9]+-x-y$/.test(branch)) {
         const owner = context.payload.repository.owner.login;
         const repo = context.payload.repository.name;
         // A release branch was updated, now we have to pull all active PRs that might need patch fixes
@@ -78,11 +80,14 @@ module.exports = (app: Probot) => {
           // Skip fork PRs
           if (pr.head.repo.owner?.login !== owner || pr.head.repo.name !== repo) continue;
           // Only run this logic for cherry-pick PRs
-          if (!pr.head.ref.startsWith(`cherry-pick/${branch}/`)) continue;
+          // if (!pr.head.ref.startsWith(`cherry-pick/${branch}/`)) continue;
+
+          app.log.info(`queuing dirty check pr: #${pr.number}`);
 
           mergabilityQueue.push(async () => {
             // Get the PR but with mergability status
             const prButBetter = await getPRWithMergability(context.octokit, owner, repo, pr.number);
+            app.log.info(`pr mergability: ${prButBetter?.mergeable_state}`);
 
             // There is a merge conflict, let's queue a merge attempt
             if (prButBetter && prButBetter.mergeable_state === 'dirty') {
@@ -102,6 +107,8 @@ module.exports = (app: Probot) => {
                     '.',
                   );
 
+                  app.log.info(`Cloned for pr: #${pr.id}`);
+
                   // Init Electron Bot as the merger
                   await git.addConfig('user.email', 'electron@github.com');
                   await git.addConfig('user.name', 'Electron Bot');
@@ -111,17 +118,70 @@ module.exports = (app: Probot) => {
                   await git.checkout(prButBetter.base.ref);
                   await git.checkout(prButBetter.head.ref);
 
+                  app.log.info(`Checked out for pr: #${pr.id}`);
+
                   // Merge base to head
-                  const { result } = await git.mergeFromTo(
-                    prButBetter.base.ref,
-                    prButBetter.head.ref,
-                  );
+                  let result = 'failed';
+                  try {
+                    await git.raw([
+                      'merge',
+                      prButBetter.base.ref,
+                      '-m',
+                      `[ci skip] Merged in branch '${prButBetter.base.ref}' to fix mergability`,
+                    ]);
+                    result = 'success';
+                  } catch (err) {
+                    // Failed to merge
+                  }
+
+                  app.log.info(`Merged for pr: #${pr.id} with status: ${result}`);
 
                   // If the merge failed, throw it all away, we're done here
                   if (result !== 'success') return;
 
-                  // If the merge worked, push up the merge result to resolve the PRs conflicts
-                  await git.push();
+                  // If the merge worked, push up the merge result to a temporary branch to create a git tree
+                  const tempBranchName = `patch-conflict-fix/${
+                    prButBetter.head.ref
+                  }/${Date.now()}`.toLowerCase();
+                  await git.raw(['checkout', '-b', tempBranchName]);
+                  await git.push('origin', tempBranchName);
+
+                  app.log.info(`Pushed temp branch for pr: #${pr.id} with name: ${tempBranchName}`);
+
+                  // Get the tree for the pushed commit, then make a second commit that will be signed using the
+                  // first tree
+                  const ref = await context.octokit.git.getRef({
+                    owner,
+                    repo,
+                    ref: `heads/${tempBranchName}`,
+                  });
+                  const commit = await context.octokit.git.getCommit({
+                    owner,
+                    repo,
+                    commit_sha: ref.data.object.sha,
+                  });
+                  const newCommit = await context.octokit.git.createCommit({
+                    owner,
+                    repo,
+                    message: commit.data.message.replace(/^\[ci skip\] /g, ''),
+                    tree: commit.data.tree.sha,
+                    parents: commit.data.parents.map((p) => p.sha),
+                  });
+
+                  // Delete the temporary branch remotely
+                  await context.octokit.git.deleteRef({
+                    ref: `heads/${tempBranchName}`,
+                    owner,
+                    repo,
+                  });
+
+                  // Set the upstream ref to be the merge commit that is now magically signed
+                  await context.octokit.git.updateRef({
+                    owner,
+                    repo,
+                    ref: `heads/${prButBetter.head.ref}`,
+                    sha: newCommit.data.sha,
+                  });
                 });
               });
             }

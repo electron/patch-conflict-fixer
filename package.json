@@ -12,9 +12,9 @@
   },
   "dependencies": {
     "fs-extra": "^9.1.0",
-    "probot": "^11.2.4",
+    "probot": "^12.2.8",
     "queue": "^6.0.2",
-    "simple-git": "^2.38.0"
+    "simple-git": "^3.15.1"
   },
   "devDependencies": {
     "@types/fs-extra": "^9.0.11",

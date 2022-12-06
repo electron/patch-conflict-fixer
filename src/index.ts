@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { Context, Probot, ProbotOctokit } from 'probot';
 import queue from 'queue';
-import * as simpleGit from 'simple-git/promise';
+import simpleGit from 'simple-git';
 
 import { RestEndpointMethodTypes } from '@octokit/plugin-rest-endpoint-methods';
 
@@ -36,10 +36,10 @@ async function withTempDir(fn: (dir: string) => Promise<void>) {
   }
 }
 
-async function getRepoToken(robot: Probot, context: Context): Promise<string> {
+async function getRepoToken(robot: Probot, context: Context<'push'>): Promise<string> {
   const hub = await robot.auth();
   const response = await hub.apps.createInstallationAccessToken({
-    installation_id: context.payload.installation.id,
+    installation_id: context.payload.installation!.id,
   });
   return response.data.token;
 }

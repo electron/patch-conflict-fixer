@@ -98,103 +98,114 @@ module.exports = (app: Probot) => {
               // There is a merge conflict, let's queue a merge attempt
               if (prButBetter && prButBetter.mergeable_state === 'dirty') {
                 mergeQueue.push(async () => {
-                  await withTempDir(async (dir) => {
-                    const clonePath = path.resolve(dir, 'clone');
-                    // Ensure dir exists and is empty
-                    await fs.mkdirp(clonePath);
-                    await fs.remove(clonePath);
-                    await fs.mkdirp(clonePath);
+                  let tempBranchName: string = '';
 
-                    // Clone the repo with auth
-                    const git = simpleGit(clonePath);
-                    const accessToken = await getRepoToken(app, context);
-                    await git.clone(
-                      `https://x-access-token:${accessToken}@github.com/${owner}/${repo}.git`,
-                      '.',
-                    );
+                  try {
+                    await withTempDir(async (dir) => {
+                      const clonePath = path.resolve(dir, 'clone');
+                      // Ensure dir exists and is empty
+                      await fs.mkdirp(clonePath);
+                      await fs.remove(clonePath);
+                      await fs.mkdirp(clonePath);
 
-                    app.log.info(`Cloned for pr: #${pr.id}`);
+                      // Clone the repo with auth
+                      const git = simpleGit(clonePath);
+                      const accessToken = await getRepoToken(app, context);
+                      await git.clone(
+                        `https://x-access-token:${accessToken}@github.com/${owner}/${repo}.git`,
+                        '.',
+                      );
 
-                    // Init Electron Bot as the merger
-                    await git.addConfig('user.email', 'electron@github.com');
-                    await git.addConfig('user.name', 'Electron Bot');
-                    await git.addConfig('commit.gpgsign', 'false');
+                      app.log.info(`Cloned for pr: #${pr.id}`);
 
-                    // Initialize local branches
-                    await git.checkout(prButBetter.base.ref);
-                    await git.checkout(prButBetter.head.ref);
+                      // Init Electron Bot as the merger
+                      await git.addConfig('user.email', 'electron@github.com');
+                      await git.addConfig('user.name', 'Electron Bot');
+                      await git.addConfig('commit.gpgsign', 'false');
 
-                    app.log.info(`Checked out for pr: #${pr.id}`);
+                      // Initialize local branches
+                      await git.checkout(prButBetter.base.ref);
+                      await git.checkout(prButBetter.head.ref);
 
-                    // Merge base to head
-                    let result = 'failed';
-                    try {
-                      await git.raw([
-                        'merge',
-                        prButBetter.base.ref,
-                        '-m',
-                        `[ci skip] Merged in branch '${prButBetter.base.ref}' to fix mergability`,
-                      ]);
-                      result = 'success';
-                    } catch (err) {
-                      // Failed to merge
+                      app.log.info(`Checked out for pr: #${pr.id}`);
+
+                      // Merge base to head
+                      let result = 'failed';
+                      try {
+                        await git.raw([
+                          'merge',
+                          prButBetter.base.ref,
+                          '-m',
+                          `[ci skip] Merged in branch '${prButBetter.base.ref}' to fix mergability`,
+                        ]);
+                        result = 'success';
+                      } catch (err) {
+                        // Failed to merge
+                      }
+
+                      app.log.info(`Merged for pr: #${pr.id} with status: ${result}`);
+
+                      // If the merge failed, throw it all away, we're done here
+                      if (result !== 'success') return;
+
+                      // If the merge worked, push up the merge result to a temporary branch to create a git tree
+                      tempBranchName = `patch-conflict-fix/${
+                        prButBetter.head.ref
+                      }/${Date.now()}`.toLowerCase();
+                      await git.raw(['checkout', '-b', tempBranchName]);
+                      await git.push('origin', tempBranchName);
+
+                      app.log.info(
+                        `Pushed temp branch for pr: #${pr.id} with name: ${tempBranchName}`,
+                      );
+
+                      // Get the tree for the pushed commit, then make a second commit that will be signed using the
+                      // first tree
+                      const ref = await context.octokit.git.getRef({
+                        owner,
+                        repo,
+                        ref: `heads/${tempBranchName}`,
+                      });
+                      const commit = await context.octokit.git.getCommit({
+                        owner,
+                        repo,
+                        commit_sha: ref.data.object.sha,
+                      });
+                      const newCommit = await context.octokit.git.createCommit({
+                        owner,
+                        repo,
+                        message: commit.data.message.replace(/^\[ci skip\] /g, ''),
+                        tree: commit.data.tree.sha,
+                        parents: commit.data.parents.map((p) => p.sha),
+                      });
+
+                      // Set the upstream ref to be the merge commit that is now magically signed
+                      await context.octokit.git.updateRef({
+                        owner,
+                        repo,
+                        ref: `heads/${prButBetter.head.ref}`,
+                        sha: newCommit.data.sha,
+                      });
+                    });
+                  } catch (err) {
+                    console.error('Failed to process PR:', pr.html_url);
+                    console.error(err);
+                  } finally {
+                    if (tempBranchName) {
+                      // Delete the temporary branch remotely
+                      await context.octokit.git
+                        .deleteRef({
+                          ref: `heads/${tempBranchName}`,
+                          owner,
+                          repo,
+                        })
+                        .catch(() => {});
                     }
-
-                    app.log.info(`Merged for pr: #${pr.id} with status: ${result}`);
-
-                    // If the merge failed, throw it all away, we're done here
-                    if (result !== 'success') return;
-
-                    // If the merge worked, push up the merge result to a temporary branch to create a git tree
-                    const tempBranchName = `patch-conflict-fix/${
-                      prButBetter.head.ref
-                    }/${Date.now()}`.toLowerCase();
-                    await git.raw(['checkout', '-b', tempBranchName]);
-                    await git.push('origin', tempBranchName);
-
-                    app.log.info(
-                      `Pushed temp branch for pr: #${pr.id} with name: ${tempBranchName}`,
-                    );
-
-                    // Get the tree for the pushed commit, then make a second commit that will be signed using the
-                    // first tree
-                    const ref = await context.octokit.git.getRef({
-                      owner,
-                      repo,
-                      ref: `heads/${tempBranchName}`,
-                    });
-                    const commit = await context.octokit.git.getCommit({
-                      owner,
-                      repo,
-                      commit_sha: ref.data.object.sha,
-                    });
-                    const newCommit = await context.octokit.git.createCommit({
-                      owner,
-                      repo,
-                      message: commit.data.message.replace(/^\[ci skip\] /g, ''),
-                      tree: commit.data.tree.sha,
-                      parents: commit.data.parents.map((p) => p.sha),
-                    });
-
-                    // Delete the temporary branch remotely
-                    await context.octokit.git.deleteRef({
-                      ref: `heads/${tempBranchName}`,
-                      owner,
-                      repo,
-                    });
-
-                    // Set the upstream ref to be the merge commit that is now magically signed
-                    await context.octokit.git.updateRef({
-                      owner,
-                      repo,
-                      ref: `heads/${prButBetter.head.ref}`,
-                      sha: newCommit.data.sha,
-                    });
-                  });
+                  }
                 });
               }
             } catch (err) {
-              console.error('Failed to process PR:', pr.html_url);
+              console.error('Failed to get merge-status for PR:', pr.html_url);
               console.error(err);
             }
           });

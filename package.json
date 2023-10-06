@@ -1,6 +1,7 @@
 {
   "name": "@electron/patch-conflict-fixer",
   "version": "0.0.0",
+  "private": true,
   "description": "Automatically fixes conflicts in PRs as a result of patch files",
   "main": "dist/index.js",
   "repository": "https://github.com/electron/patch-conflict-fixer",

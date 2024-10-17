@@ -1,11 +1,12 @@
-import * as fs from 'fs-extra';
-import * as os from 'os';
-import * as path from 'path';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
 import { Context, Probot, ProbotOctokit } from 'probot';
 import queue from 'queue';
 import simpleGit from 'simple-git';
 
-import { RestEndpointMethodTypes } from '@octokit/plugin-rest-endpoint-methods';
+import type { RestEndpointMethodTypes } from '@octokit/plugin-rest-endpoint-methods';
 
 async function getPRWithMergability(
   octokit: InstanceType<typeof ProbotOctokit>,
@@ -32,7 +33,7 @@ async function withTempDir(fn: (dir: string) => Promise<void>) {
   } catch (err) {
     throw err;
   } finally {
-    await fs.remove(dir);
+    await fs.rm(dir, { recursive: true, force: true });
   }
 }
 
@@ -59,7 +60,7 @@ module.exports = (app: Probot) => {
     const { ref } = context.payload;
     app.log.info(`push for ref: ${ref}`);
     if (ref.startsWith('refs/heads/')) {
-      const branch = ref.substr('refs/heads/'.length);
+      const branch = ref.substring('refs/heads/'.length);
       app.log.info(`push for branch: ${branch}`);
       if (branch === 'main' || /^[0-9]+-x-y$/.test(branch)) {
         const owner = context.payload.repository.owner.login;
@@ -104,9 +105,9 @@ module.exports = (app: Probot) => {
                     await withTempDir(async (dir) => {
                       const clonePath = path.resolve(dir, 'clone');
                       // Ensure dir exists and is empty
-                      await fs.mkdirp(clonePath);
-                      await fs.remove(clonePath);
-                      await fs.mkdirp(clonePath);
+                      await fs.mkdir(clonePath, { recursive: true });
+                      await fs.rm(clonePath, { recursive: true, force: true });
+                      await fs.mkdir(clonePath, { recursive: true });
 
                       // Clone the repo with auth
                       const git = simpleGit(clonePath);

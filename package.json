@@ -15,7 +15,7 @@
   "dependencies": {
     "probot": "^13.3.8",
     "queue": "^6.0.2",
-    "simple-git": "^3.32.3"
+    "simple-git": "^3.36.0"
   },
   "devDependencies": {
     "@types/node": "^22.7.6",
